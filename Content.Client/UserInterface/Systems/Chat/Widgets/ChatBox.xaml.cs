@@ -1,3 +1,5 @@
+using System.Numerics;
+using Content.Client.UserInterface.Controls;
 using Content.Client.UserInterface.Systems.Chat.Controls;
 using Content.Shared.Chat;
 using Content.Shared.Input;
@@ -7,7 +9,9 @@ using Robust.Client.GameObjects;
 using Robust.Client.UserInterface;
 using Robust.Client.UserInterface.Controls;
 using Robust.Client.UserInterface.XAML;
+using Robust.Shared;
 using Robust.Shared.Audio;
+using Robust.Shared.Configuration;
 using Robust.Shared.Input;
 using Robust.Shared.Player;
 using Robust.Shared.Utility;
@@ -19,13 +23,22 @@ namespace Content.Client.UserInterface.Systems.Chat.Widgets;
 [Virtual]
 public partial class ChatBox : UIWidget
 {
+    private int _selectedIndex = -1; // -1 = ничего не выделено
+    private IReadOnlyList<string> _currentCompletions = Array.Empty<string>();
     [Dependency] private readonly IEntityManager _entManager = default!;
     [Dependency] private readonly ILogManager _log = default!;
+
+    [Dependency] private readonly IConfigurationManager _cfg = default!;
+    private readonly ChatCompletion _popup;
+
+    private string _prevInput = "";
 
     private readonly ISawmill _sawmill;
     private readonly ChatUIController _controller;
 
     public bool Main { get; set; }
+
+    private ChatAutocompleteHandler AutocompleteHandler { get; set; }
 
     public ChatSelectChannel SelectedChannel => ChatInput.ChannelSelector.SelectedChannel;
 
@@ -46,10 +59,33 @@ public partial class ChatBox : UIWidget
         _controller.MessageAdded += OnMessageAdded;
         _controller.HighlightsUpdated += OnHighlightsUpdated;
         _controller.RegisterChat(this);
+
+        AutocompleteHandler = new ChatAutocompleteHandler();
+        _popup = new ChatCompletion();
+        _popup.OnPopupOpen += OnPopupOpen;
+        _popup.OnPopupHide += OnPopupHide;
     }
+
+    private void OnPopupOpen()
+    {
+        //UserInterfaceManager.ModalRoot.AddChild(_popup);
+        UserInterfaceManager.ModalRoot.AddChild(_popup);
+    }
+    private void OnPopupHide()
+    {
+        UserInterfaceManager.ModalRoot.RemoveChild(_popup);
+    }
+
 
     private void OnTextEntered(LineEditEventArgs args)
     {
+        var strings = AutocompleteHandler.ParseInput(args.Text);
+        foreach (var item in strings)
+        {
+            AutocompleteHandler.AddWord(item);
+        }
+        AutocompleteHandler.SaveDictionary();
+
         _controller.SendMessage(this, SelectedChannel);
     }
 
@@ -179,10 +215,78 @@ public partial class ChatBox : UIWidget
             CycleChatChannel(false);
             args.Handle();
         }
+
+        if (_popup.Visible) // если попап открыт
+        {
+            if (args.Function == EngineKeyFunctions.TextCursorUp)
+            {
+                _selectedIndex--;
+                if (_selectedIndex < 0)
+                    _selectedIndex = _currentCompletions.Count - 1;
+                HighlightSelected();
+                args.Handle();
+                _sawmill.Info("cursor up");
+                return;
+            }
+            else if (args.Function == EngineKeyFunctions.TextCursorDown)
+            {
+                _selectedIndex++;
+                if (_selectedIndex >= _currentCompletions.Count)
+                    _selectedIndex = 0;
+                HighlightSelected();
+                args.Handle();
+                _sawmill.Info("cursor down");
+                return;
+            }
+            else if (args.Function == EngineKeyFunctions.TextCursorRight)
+            {
+                ApplySelectedCompletion();
+                args.Handle();
+                _sawmill.Info("cursor right");
+                return;
+            }
+            _sawmill.Info("popup is open. index = " + _selectedIndex);
+        }
+    }
+    private void HighlightSelected()
+    {
+        for (int i = 0; i < _popup.Contents.ChildCount; i++)
+        {
+            if (_popup.Contents.GetChild(i) is Label label)
+            {
+                label.FontColorOverride = (i == _selectedIndex) ? Color.White : Color.Gray;
+            }
+        }
+    }
+    private void ApplySelectedCompletion()
+    {
+        if (_selectedIndex < 0 || _selectedIndex >= _currentCompletions.Count)
+            return;
+
+        string currentText = ChatInput.Input.Text;
+        string selected = _currentCompletions[_selectedIndex];
+
+        // заменяем только последнее слово
+        ChatInput.Input.Text = AutocompleteHandler.ReplaceLastWord(currentText, selected);
+
+        ChatInput.Input.CursorPosition = ChatInput.Input.Text.Length;
+        _popup.Close();
     }
 
     private void OnTextChanged(LineEditEventArgs args)
     {
+        string toAppend = AutocompleteHandler.GetWordPartToAppend(args.Text);
+        int posToAppend = args.Control.Text.Length;
+        if (toAppend != "")
+        {
+            args.Control.Text = args.Control.Text.Insert(args.Control.Text.Length, toAppend);
+            args.Control.CursorPosition = posToAppend;
+            args.Control.SelectionStart = args.Control.Text.Length;
+
+            // AutocompleteHandler.PrevInput = args.Text;
+        }
+        UpdateCompletionsPopup(args.Text);
+
         // Update channel select button to correct channel if we have a prefix.
         _controller.UpdateSelectedChannel(this);
 
@@ -212,5 +316,44 @@ public partial class ChatBox : UIWidget
         ChatInput.Input.OnKeyBindDown -= OnInputKeyBindDown;
         ChatInput.Input.OnTextChanged -= OnTextChanged;
         ChatInput.ChannelSelector.OnChannelSelect -= OnChannelSelect;
+    }
+
+    private void UpdateCompletionsPopup(string input)
+    {
+        _popup.Close();
+        _popup.Contents.RemoveAllChildren();
+        if (input == _prevInput || input == "") return;
+        _prevInput = input;
+        var completions = AutocompleteHandler.GetCompletions(input);
+        _currentCompletions = completions;
+        if (completions.Count == 0)
+        {
+            _popup.Close();
+            _selectedIndex = -1;
+            return;
+        }
+
+
+        if (input == null || completions == null || _popup == null)
+            return;
+
+        foreach (var completion in completions)
+        {
+            _popup.Contents.AddChild(new Label
+            {
+                Text = completion,
+                FontColorOverride = Color.Gray
+            }
+            );
+        }
+        _popup.CloseOnClick = false;
+        _popup.CloseOnEscape = false;
+        var box = UIBox2.FromDimensions(ChatInput.Input.GlobalPosition.X, ChatInput.Input.GlobalPosition.Y + ChatInput.Height + 2,
+                    5, 5);
+        if (completions.Count > 0)
+            _popup.Open(box);
+        _selectedIndex = -1;
+        //HighlightSelected();
+        _sawmill.Info($"parent of popup is {_popup.Parent}");
     }
 }
