@@ -218,7 +218,7 @@ public partial class ChatBox : UIWidget
 
         if (_popup.Visible) // если попап открыт
         {
-            if (args.Function == EngineKeyFunctions.TextCursorUp)
+            if (args.Function == EngineKeyFunctions.TextCursorUp) //!!! заменить на ContentKeyFunctions
             {
                 _selectedIndex--;
                 if (_selectedIndex < 0)

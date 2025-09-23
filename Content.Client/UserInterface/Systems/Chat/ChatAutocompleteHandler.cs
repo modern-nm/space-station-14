@@ -3,70 +3,70 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Text.Unicode;
-
-//#pragma warning disable RA0003
+using System.Collections.Generic;
+using System.Linq;
 
 namespace Content.Client.UserInterface.Systems.Chat
 {
     internal class ChatAutocompleteHandler
     {
-        public List<Word> Lexicon { get; set; }
+        public Trie Lexicon { get; set; }
         public JsonSerializerOptions Options { get; set; }
         private string JsonString { get; set; }
 
         public string PrevInput { get; set; }
 
-        readonly string _dictpath = Path.Combine(Environment.GetFolderPath(
-    Environment.SpecialFolder.ApplicationData), @"Space Station 14/data/autocomplete_dict.json");
+        readonly string _dictpath = Path.Combine(
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
+            @"Space Station 14/data/autocomplete_dict.json");
 
         public ChatAutocompleteHandler()
         {
-            Lexicon = GetDictList();
+            Lexicon = new Trie();
             JsonString = "";
-            Options = new JsonSerializerOptions { Encoder = JavaScriptEncoder.Create(UnicodeRanges.BasicLatin, UnicodeRanges.Cyrillic), WriteIndented = true };
+            Options = new JsonSerializerOptions
+            {
+                Encoder = JavaScriptEncoder.Create(UnicodeRanges.BasicLatin, UnicodeRanges.Cyrillic),
+                WriteIndented = true
+            };
             PrevInput = "";
-            SortLexicon();
+            LoadDictionary();
             SaveDictionary();
         }
 
-        public List<Word> GetDictList()
+        private void LoadDictionary()
         {
-            if (OperatingSystem.IsWindows())
+            if (System.OperatingSystem.IsWindows())
             {
                 if (!File.Exists(_dictpath))
                 {
-                    File.WriteAllText(_dictpath, JsonSerializer.Serialize(Lexicon, Options));
-                    //File.WriteAllText(_dictpath, JsonSerializer.Serialize<List<Word>>(new List<Word>()));
-                    //StreamWriter streamWriter = new StreamWriter(_dictpath, false);
-                    //streamWriter.Write(JsonSerializer.Serialize(Dict));
-                    //streamWriter.Close();
-                    return new List<Word>();
+                    SaveDictionary();
                 }
                 else
                 {
                     JsonString = File.ReadAllText(_dictpath);
-                    var data = (JsonSerializer.Deserialize<List<Word>>(JsonString, Options));
-                    return data != null ? data : new List<Word>();
+                    var data = JsonSerializer.Deserialize<List<Word>>(JsonString, Options);
+                    if (data != null)
+                    {
+                        foreach (var w in data)
+                            Lexicon.Insert(w.Text, w.Frequency);
+                    }
                 }
             }
-            else return new List<Word>();
         }
+
         public void SaveDictionary()
         {
-            var str = JsonSerializer.Serialize(Lexicon, Options);
+            var words = Lexicon.ToWordList();
+            var str = JsonSerializer.Serialize(words, Options);
             File.WriteAllText(_dictpath, str);
         }
 
-        //Try to add word to lexinon [ List<Word> Dict ]
         public void AddWord(string item)
         {
-            if (!Lexicon.Exists(x => x.Text == item))
-            {
-                Word word = new Word(item);
-                Lexicon.Add(word);
-            }
+            Lexicon.Insert(item);
         }
-        //Parse chat input. прикрутить на Chatbox.OnTextEntered
+
         public List<string> ParseInput(string input)
         {
             Regex regex = new Regex(@"\w+");
@@ -78,30 +78,26 @@ namespace Content.Client.UserInterface.Systems.Chat
             }
             return strings;
         }
-        //прикрутить на chatbox.onTextChanged
+
         public string GetWordPartToAppend(string input)
         {
             Regex regex = new Regex(@"\w+$");
             Match match = regex.Match(input);
             if (match.Value != "")
             {
-                foreach (var item in Lexicon)
+                var suggestions = Lexicon.GetSuggestions(match.Value.ToLower(), 1);
+                if (suggestions.Count > 0)
                 {
-                    if (item.Text.StartsWith(match.Value.ToLower()))
+                    var suggestion = suggestions[0];
+                    if (PrevInput.Length >= input.Length)
                     {
-                        int length = item.Text.Length - match.Value.Length;
-                        string toAppend = item.Text.Substring(match.Value.Length, length);
-                        if (PrevInput.Length >= input.Length)
-                        {
-                            PrevInput = input;
-                            return "";
-                        }
                         PrevInput = input;
-                        return toAppend;
+                        return "";
                     }
+
+                    PrevInput = input;
+                    return suggestion.Substring(match.Value.Length);
                 }
-                PrevInput = input;
-                return "";
             }
             PrevInput = input;
             return "";
@@ -112,54 +108,102 @@ namespace Content.Client.UserInterface.Systems.Chat
             int idx = text.LastIndexOf(' ');
             return idx == -1 ? text : text.Substring(idx + 1);
         }
+
         public string ReplaceLastWord(string text, string replacement)
         {
             int idx = text.LastIndexOf(' ');
             if (idx == -1)
-            {
-                // если нет пробелов, заменяем всю строку
                 return replacement;
-            }
-
-            // всё до последнего пробела + новое слово
             return text.Substring(0, idx + 1) + replacement;
         }
+
         public List<string> GetCompletions(string input)
         {
-            var _maxCount = 10;
-
             Regex regex = new Regex(@"\w+$");
             Match match = regex.Match(input);
-            List<string> completions = new List<string>();
-            foreach (var item in Lexicon)
-            {
-                if (item.Text.StartsWith(match.Value.ToLower()))
-                {
-                    int length = item.Text.Length - match.Value.Length;
-                    string toAppend = item.Text.Substring(match.Value.Length, length);
-                    completions.Add(item.Text);
-                }
-                if (completions.Count >= _maxCount) break;
-            }
-            return completions;
+            if (match.Success)
+                return Lexicon.GetSuggestions(match.Value.ToLower(), 10);
+            return new List<string>();
         }
-
-        public void SortLexicon()
-        {
-            Lexicon.Sort(delegate (Word x, Word y)
-            {
-                if (x.Text == null && y.Text == null) return 0;
-                else if (x.Text == null) return -1;
-                else if (y.Text == null) return 1;
-                else return x.Text.CompareTo(y.Text);
-            });
-        }
-
     }
 
     internal class Word
     {
         public string Text { get; set; }
-        public Word(string text) { Text = text; }
+        public int Frequency { get; set; }
+        public Word(string text, int frequency = 1)
+        {
+            Text = text;
+            Frequency = frequency;
+        }
+    }
+
+    internal class TrieNode
+    {
+        public Dictionary<char, TrieNode> Children { get; } = new();
+        public bool IsWord { get; set; }
+        public int Frequency { get; set; }
+    }
+
+    internal class Trie
+    {
+        private readonly TrieNode _root = new();
+
+        public void Insert(string word, int frequency = 1)
+        {
+            var node = _root;
+            foreach (var ch in word)
+            {
+                if (!node.Children.ContainsKey(ch))
+                    node.Children[ch] = new TrieNode();
+                node = node.Children[ch];
+            }
+            node.IsWord = true;
+            node.Frequency += frequency;
+        }
+
+        public List<string> GetSuggestions(string prefix, int maxCount = 5)
+        {
+            var node = _root;
+            foreach (var ch in prefix)
+            {
+                if (!node.Children.TryGetValue(ch, out node!))
+                    return new List<string>();
+            }
+
+            var result = new List<(string word, int freq)>();
+            DFS(node, prefix, result);
+
+            return result
+                .OrderByDescending(x => x.freq)
+                .Take(maxCount)
+                .Select(x => x.word)
+                .ToList();
+        }
+
+        private void DFS(TrieNode node, string current, List<(string, int)> result)
+        {
+            if (node.IsWord)
+                result.Add((current, node.Frequency));
+
+            foreach (var kvp in node.Children)
+                DFS(kvp.Value, current + kvp.Key, result);
+        }
+
+        public List<Word> ToWordList()
+        {
+            var result = new List<Word>();
+            Collect(_root, "", result);
+            return result;
+        }
+
+        private void Collect(TrieNode node, string current, List<Word> result)
+        {
+            if (node.IsWord)
+                result.Add(new Word(current, node.Frequency));
+
+            foreach (var kvp in node.Children)
+                Collect(kvp.Value, current + kvp.Key, result);
+        }
     }
 }
